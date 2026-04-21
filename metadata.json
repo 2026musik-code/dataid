@@ -1,0 +1,8 @@
+{
+  "name": "Remix: DATA SDM INDONESIA",
+  "description": "Dashboard interaktif data SDM dan kebijakan pemerintah Indonesia berbasis wilayah, ditenagai oleh AI Gemini 3.1 Lite.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": []
+}
