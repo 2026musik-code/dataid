@@ -6,6 +6,14 @@ interface Env {
   VPSAI_BUCKET: R2Bucket;
 }
 
+interface VisitorData {
+  ip: string;
+  userAgent: string;
+  visitCount: number;
+  regionsViewed: Record<string, number>;
+  lastVisit: string;
+}
+
 // Utility to get all keys
 async function getApiKeys(env: Env): Promise<string[]> {
   try {
@@ -31,9 +39,74 @@ async function saveApiKeys(env: Env, keys: string[]) {
   await env.VPSAI_BUCKET.put('gemini_api_keys_list', JSON.stringify(keys));
 }
 
+// Analytics Utils
+async function getAnalytics(env: Env): Promise<Record<string, VisitorData>> {
+  try {
+    const obj = await env.VPSAI_BUCKET.get('analytics_data');
+    if (obj) {
+      return JSON.parse(await obj.text());
+    }
+  } catch (e) {
+    console.error(e);
+  }
+  return {};
+}
+
+async function saveAnalytics(env: Env, data: Record<string, VisitorData>) {
+  await env.VPSAI_BUCKET.put('analytics_data', JSON.stringify(data));
+}
+
+async function trackAnalytics(req: Request, env: Env, regionName?: string) {
+  const ip = req.headers.get('CF-Connecting-IP') || 'unknown';
+  const userAgent = req.headers.get('User-Agent') || 'unknown';
+  
+  const analytics = await getAnalytics(env);
+  
+  if (!analytics[ip]) {
+    analytics[ip] = {
+      ip,
+      userAgent,
+      visitCount: 0,
+      regionsViewed: {},
+      lastVisit: new Date().toISOString()
+    };
+  }
+  
+  analytics[ip].visitCount += 1;
+  analytics[ip].lastVisit = new Date().toISOString();
+  
+  if (regionName && regionName.trim() !== '') {
+    analytics[ip].regionsViewed[regionName] = (analytics[ip].regionsViewed[regionName] || 0) + 1;
+  }
+  
+  await saveAnalytics(env, analytics);
+  return analytics[ip];
+}
+
+async function checkIpLimit(req: Request, env: Env): Promise<boolean> {
+  const ip = req.headers.get('CF-Connecting-IP') || 'unknown';
+  const analytics = await getAnalytics(env);
+  const visitor = analytics[ip];
+  
+  if (visitor && visitor.visitCount > 100) {
+     return true; // limit exceeded
+  }
+  return false;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    // API GET /api/admin/stats
+    if (request.method === 'GET' && url.pathname === '/api/admin/stats') {
+       try {
+         const analytics = await getAnalytics(env);
+         return new Response(JSON.stringify(analytics), { headers: { 'Content-Type': 'application/json' }});
+       } catch (err: any) {
+         return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: { 'Content-Type': 'application/json' }});
+       }
+    }
 
     // AI POST /api/save-key (Legacy support, redirects to array logic)
     if (request.method === 'POST' && url.pathname === '/api/save-key') {
@@ -118,8 +191,14 @@ export default {
     // AI POST /api/region
     if (request.method === 'POST' && url.pathname === '/api/region') {
       try {
+        if (await checkIpLimit(request, env)) {
+           return new Response(JSON.stringify({ error: "Rate limit exceeded. Coba lagi nanti." }), { status: 429, headers: { 'Content-Type': 'application/json' }});
+        }
+        
         const body = await request.json() as { provinceName: string, selectedModel: string, mapMode?: string, keyId?: string };
         const { provinceName, selectedModel, mapMode = 'SEKOLAH', keyId } = body;
+        
+        await trackAnalytics(request, env, provinceName);
         
         const keys = await getApiKeys(env);
         let activeKey = "";
@@ -234,8 +313,14 @@ Kembalikan data HANYA dalam format JSON valid yang berisi persis struktur beriku
     // AI POST /api/chat
     if (request.method === 'POST' && url.pathname === '/api/chat') {
       try {
+        if (await checkIpLimit(request, env)) {
+           return new Response(JSON.stringify({ error: "Rate limit exceeded. Coba lagi nanti." }), { status: 429, headers: { 'Content-Type': 'application/json' }});
+        }
+        
         const body = await request.json() as { userText: string, selectedRegion: string, selectedModel: string };
         const { userText, selectedRegion, selectedModel } = body;
+        
+        await trackAnalytics(request, env, selectedRegion);
         
         const keys = await getApiKeys(env);
         const activeKey = env.GEMINI_API_KEY || keys[0];
@@ -257,6 +342,17 @@ Kembalikan data HANYA dalam format JSON valid yang berisi persis struktur beriku
     }
 
     // For any other route, serve via Asset bucket (Vite build)
-    return env.ASSETS.fetch(request);
+    try {
+      let response = await env.ASSETS.fetch(request);
+      
+      // SPA Fallback: if 404 for a GET request and not an API call
+      if (response.status === 404 && request.method === 'GET' && !url.pathname.startsWith('/api/') && !url.pathname.includes('.')) {
+         return await env.ASSETS.fetch(new Request(new URL('/', request.url), request));
+      }
+      return response;
+    } catch (e) {
+      // If asset fetching fails entirely, fallback to index
+      return await env.ASSETS.fetch(new Request(new URL('/', request.url), request));
+    }
   }
 }
