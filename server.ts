@@ -5,10 +5,75 @@ import fs from "fs/promises";
 import path from "path";
 
 const app = express();
+app.set('trust proxy', true);
 app.use(express.json());
 const PORT = 3000;
 
 const KEYS_FILE = path.join(process.cwd(), 'server-keys.json');
+const ANALYTICS_FILE = path.join(process.cwd(), 'analytics.json');
+
+interface VisitorData {
+  ip: string;
+  userAgent: string;
+  visitCount: number;
+  regionsViewed: Record<string, number>;
+  lastVisit: string;
+}
+
+async function getAnalytics(): Promise<Record<string, VisitorData>> {
+  try {
+    const data = await fs.readFile(ANALYTICS_FILE, 'utf-8');
+    return JSON.parse(data);
+  } catch (e) {
+    return {};
+  }
+}
+
+async function saveAnalytics(data: Record<string, VisitorData>) {
+  await fs.writeFile(ANALYTICS_FILE, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+// Middleware to track analytics
+async function trackAnalytics(req: express.Request, regionName?: string) {
+  const ip = req.ip || req.connection.remoteAddress || 'unknown';
+  const userAgent = req.headers['user-agent'] || 'unknown';
+  
+  const analytics = await getAnalytics();
+  
+  if (!analytics[ip]) {
+    analytics[ip] = {
+      ip,
+      userAgent,
+      visitCount: 0,
+      regionsViewed: {},
+      lastVisit: new Date().toISOString()
+    };
+  }
+  
+  analytics[ip].visitCount += 1;
+  analytics[ip].lastVisit = new Date().toISOString();
+  
+  if (regionName) {
+    analytics[ip].regionsViewed[regionName] = (analytics[ip].regionsViewed[regionName] || 0) + 1;
+  }
+  
+  await saveAnalytics(analytics);
+  return analytics[ip];
+}
+
+// Check IP limit (e.g. max 50 requests per session/ip roughly)
+async function checkIpLimit(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const ip = req.ip || req.connection.remoteAddress || 'unknown';
+  const analytics = await getAnalytics();
+  const visitor = analytics[ip];
+  
+  // Example Limit: 100 requests per IP to avoid spam
+  if (visitor && visitor.visitCount > 100) {
+     res.status(429).json({ error: "Rate limit exceeded. Coba lagi nanti." });
+     return;
+  }
+  next();
+}
 
 async function getApiKeys(): Promise<string[]> {
   try {
@@ -114,9 +179,12 @@ app.post('/api/ping', async (req, res) => {
 });
 
 // API POST /api/region
-app.post('/api/region', async (req, res) => {
+app.post('/api/region', checkIpLimit, async (req, res) => {
   try {
     const { provinceName, selectedModel, mapMode = 'SEKOLAH', keyId } = req.body;
+    
+    // Track visitor
+    await trackAnalytics(req, provinceName);
     
     const keys = await getApiKeys();
     let activeKey = "";
@@ -226,9 +294,12 @@ Kembalikan data HANYA dalam format JSON valid yang berisi persis struktur beriku
 });
 
 // API POST /api/chat
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', checkIpLimit, async (req, res) => {
   try {
     const { userText, selectedRegion, selectedModel } = req.body;
+    
+    // Track visitor
+    await trackAnalytics(req, selectedRegion);
     
     const keys = await getApiKeys();
     const activeKey = process.env.GEMINI_API_KEY || keys[0];
@@ -247,6 +318,16 @@ app.post('/api/chat', async (req, res) => {
     res.json({ text: result.text });
   } catch(e: any) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// API GET /api/admin/stats
+app.get('/api/admin/stats', async (req, res) => {
+  try {
+     const analytics = await getAnalytics();
+     res.json(analytics);
+  } catch (e: any) {
+     res.status(500).json({ error: e.message });
   }
 });
 
