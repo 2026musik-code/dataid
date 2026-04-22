@@ -1,4 +1,4 @@
-name = "data-sdm-indonesia"
+name = "dataid"
 main = "worker/index.ts"
 compatibility_date = "2024-03-20"
 
