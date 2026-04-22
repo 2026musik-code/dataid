@@ -341,18 +341,20 @@ Kembalikan data HANYA dalam format JSON valid yang berisi persis struktur beriku
       }
     }
 
-    // For any other route, serve via Asset bucket (Vite build)
+    // For any other route, pass to SPA Fallback
     try {
-      let response = await env.ASSETS.fetch(request);
-      
-      // SPA Fallback: if 404 for a GET request and not an API call
-      if (response.status === 404 && request.method === 'GET' && !url.pathname.startsWith('/api/') && !url.pathname.includes('.')) {
-         return await env.ASSETS.fetch(new Request(new URL('/', request.url), request));
+      if (request.method === 'GET' && !url.pathname.startsWith('/api/') && !url.pathname.includes('.')) {
+        // SPA Fallback: Serve index.html
+        if (env.ASSETS) {
+           return await env.ASSETS.fetch(new Request(new URL('/index.html', request.url), request));
+        } else {
+           // If somehow ASSETS is not bound correctly
+           return new Response("Index.html not found, ASSETS binding is missing.", {status: 404});
+        }
       }
-      return response;
-    } catch (e) {
-      // If asset fetching fails entirely, fallback to index
-      return await env.ASSETS.fetch(new Request(new URL('/', request.url), request));
+      return env.ASSETS ? await env.ASSETS.fetch(request) : new Response("Not found", {status: 404});
+    } catch (e: any) {
+      return new Response(JSON.stringify({ error: "Worker crash on ASSETS: " + e.message, stack: e.stack }), { status: 500 });
     }
   }
 }
