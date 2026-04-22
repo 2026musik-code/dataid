@@ -3,7 +3,7 @@ main = "worker/index.ts"
 compatibility_date = "2024-03-20"
 
 # Serve static assets from the React build directory
-assets = { directory = "dist" }
+assets = { directory = "dist", binding = "ASSETS" }
 
 [[r2_buckets]]
 binding = 'VPSAI_BUCKET'
